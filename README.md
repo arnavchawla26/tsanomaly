@@ -1,39 +1,37 @@
 # tsanomaly
 
-A dependency-free (Python stdlib only) time series anomaly detection toolkit.
-It implements classical additive seasonal decomposition (centered
-moving-average trend + period-averaged seasonal component) and scores the
-leftover residuals with a choice of z-score, median/MAD "modified z-score",
-or IQR ("Tukey's fences") detectors — plus a causal rolling z-score detector
-for series with no fixed seasonal period. Includes a `demo` command that
-generates a synthetic series with a *known* set of injected anomalies and
-reports precision/recall/F1 against that ground truth, so the tool is
-verifiable without needing a real dataset on hand.
+Point-anomaly detection for a single time series, written against the Python
+standard library only. I built it in September 2026, with three other small
+exercises (bayesab, minietl, gbdt), to understand the algorithms from the
+inside before using statsmodels or scikit-learn for the same thing.
 
-## Why decomposition first?
+It decomposes a seasonal series the classical way (centered moving-average
+trend, period-averaged seasonal component) and scores what is left over with
+a z-score, a median/MAD modified z-score, or Tukey's IQR fences. There is a
+causal rolling z-score for series with no fixed period, and a `demo` command
+that injects a known set of anomalies into a synthetic series and reports
+precision, recall and F1 against them, so the tool can be checked without a
+real dataset on hand.
 
-Running a plain z-score over a raw series with a daily or weekly cycle
-doesn't work well: the seasonal swing itself looks like "spread", so the
-threshold either misses real anomalies or flags half the peaks and troughs
-as outliers. Decomposing first — subtracting off the trend and the typical
-shape of the cycle — leaves a residual that should look like noise around
-zero when nothing unusual happened, which is what the point/threshold-based
-detectors are actually built to catch.
+Python 3.9+, no runtime dependencies (`csv`, `statistics`, `math`, `random`,
+`argparse`, `dataclasses`). Tests use `pytest`.
 
-## Tech stack
+## Why decompose first
 
-Python 3.9+, standard library only (`csv`, `statistics`, `math`, `random`,
-`argparse`, `dataclasses`) — no numpy/pandas/scipy. Tests use `pytest`.
+A plain z-score over a raw series with a daily or weekly cycle does not work
+well: the seasonal swing itself looks like spread, so the threshold either
+misses real anomalies or flags half the peaks and troughs. Subtracting the
+trend and the typical shape of the cycle first leaves a residual that should
+look like noise around zero when nothing unusual happened, which is what the
+threshold detectors are built to catch.
 
-## Install
+## Run it
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Usage
-
-### `detect` — decompose a CSV column and flag anomalies
+### `detect`: decompose a CSV column and flag anomalies
 
 ```bash
 tsanomaly detect --input readings.csv --value-col reading --timestamp-col hour \
@@ -49,30 +47,28 @@ stats: {'mean': -0.007313585069445144, 'std': 1.1422518471888226, 'threshold': 3
   [74] t=74 value=35.1790 residual=8.7531
 ```
 
-Pass `--format json` for machine-readable output. Use `--trend-window N`
-instead of `--period N` for a series that drifts but has no fixed seasonal
-cycle (subtracts a plain moving-average trend, no seasonal step). Choose the
-scoring method with `--method {zscore,modified_zscore,iqr}` (defaults:
-z-score threshold 3.0, modified-z threshold 3.5, IQR fence multiplier 1.5,
-all overridable with `--threshold` / `--k`).
+`--format json` gives machine-readable output. `--trend-window N` instead of
+`--period N` handles a series that drifts but has no seasonal cycle (plain
+moving-average trend, no seasonal step). `--method {zscore,modified_zscore,iqr}`
+picks the scorer; defaults are a z-score threshold of 3.0, a modified-z
+threshold of 3.5 and an IQR fence multiplier of 1.5, overridable with
+`--threshold` and `--k`.
 
-### `rolling-detect` — no decomposition, streaming-style
+### `rolling-detect`: no decomposition, streaming-style
 
 ```bash
 tsanomaly rolling-detect --input readings.csv --value-col reading --window 20 --threshold 3.0
 ```
 
-Compares each point against the mean/std of the `window` points strictly
-*before* it (never including itself), so it works online and needs no
-seasonal period.
+Each point is compared against the mean and std of the `window` points
+strictly before it, never including itself, so it works online and needs no
+period.
 
-### `demo` — synthetic ground truth + precision/recall/F1
+### `demo`: synthetic ground truth, scored
 
 ```bash
 tsanomaly demo --length 200 --period 24 --anomalies 6 --seed 42 --method zscore
 ```
-
-Real output:
 
 ```
 synthetic demo: 200 points, period=24, method=zscore
@@ -83,49 +79,63 @@ synthetic demo: 200 points, period=24, method=zscore
 
 ## How it works
 
-1. **Trend**: a centered moving average of length `period` (or
-   `--trend-window`). Even windows use the standard "2xM" centering trick so
-   the estimate lands on an integer index instead of a half-step offset.
-2. **Seasonal** (period mode only): detrend, then average the detrended
-   values at each position within the period (e.g. every hour-0, every
-   hour-1, ...), normalized so the seasonal indices sum to zero.
-3. **Residual**: `value - trend - seasonal` (or `value - trend` in
-   trend-only mode).
-4. **Detection**: score the residuals with one of:
-   - `zscore` — flag `|residual - mean| / std > threshold`.
-   - `modified_zscore` — Iglewicz & Hoaglin's median/MAD version, more
-     robust when the anomalies themselves are large enough to pull a plain
-     mean/std around.
-   - `iqr` — Tukey's fences: flag anything outside
-     `[Q1 - k*IQR, Q3 + k*IQR]` (linear-interpolation percentiles, matching
-     numpy's default method).
-   - `rolling_zscore` (via `rolling-detect`) — causal trailing-window
-     z-score directly on raw values, no decomposition.
+1. Trend: a centered moving average of length `period` (or `--trend-window`).
+   Even windows use the usual "2xM" centering so the estimate lands on an
+   integer index rather than a half-step.
+2. Seasonal (period mode only): detrend, then average the detrended values at
+   each position within the period (every hour-0, every hour-1, and so on),
+   normalized so the seasonal indices sum to zero.
+3. Residual: `value - trend - seasonal`, or `value - trend` in trend-only mode.
+4. Detection on the residuals:
+   - `zscore` flags `|residual - mean| / std > threshold`.
+   - `modified_zscore` is Iglewicz and Hoaglin's median/MAD version, which
+     holds up better when the anomalies are big enough to drag the mean and
+     std around.
+   - `iqr` is Tukey's fences, `[Q1 - k*IQR, Q3 + k*IQR]`, with
+     linear-interpolation percentiles matching numpy's default.
+   - `rolling_zscore` (the `rolling-detect` command) is a trailing-window
+     z-score on the raw values, no decomposition.
 
-## Current status
+## Known issues
 
-Functional v1: decomposition, all four detectors, CSV I/O, a synthetic data
-generator with ground-truth anomaly indices, and a `demo` command that
-scores a detector's precision/recall/F1 against that ground truth.
-39 passing pytest tests covering the moving-average math (including a
-hand-verified even-window centering case), decomposition correctness on a
-noise-free synthetic signal, every detector's edge cases (`None`-skipping,
-zero-variance/zero-MAD series, hand-computed IQR fences), the synthetic
-generator's determinism, and CLI end-to-end runs including a
-subprocess-level `python -m tsanomaly.cli` check.
+Things I found by reading the code back and running it, not a wish list.
 
-Not yet implemented: multiplicative decomposition, STL (loess-based, as
-opposed to this moving-average-based classical decomposition), multivariate
-series, and change-point / level-shift detection (this only targets point
-anomalies, not sustained regime shifts).
+- The first and last `period // 2` points never get a residual, because the
+  centered moving average needs a full window on both sides. With
+  `--period 24` that is 12 points at each end that can never be flagged, and
+  `--trend-window` has the same edge.
+- Plain `zscore` masks itself once anomalies are dense: the spikes inflate the
+  std they are measured against. `tsanomaly demo --length 500 --period 24
+  --anomalies 20 --seed 7` gets recall 0.80 with `zscore` and 1.00 with
+  `modified_zscore` or `iqr`. The default should probably be
+  `modified_zscore`.
+- The seasonal index at each position is a plain mean of the detrended
+  values, so a large spike leaks a little into the seasonal estimate for its
+  slot. R's `decompose()` has the same weakness; STL would not.
+- When the MAD is zero (`modified_zscore`) or a rolling window has zero
+  variance (`rolling-detect`), any point that differs from the median or mean
+  at all is flagged, including floating-point noise.
+- The CSV loader needs every cell in the value column to parse as a float; a
+  blank cell is an error, not a missing value. Rows are taken in file order
+  and timestamps are passed through as strings, never parsed or sorted.
+- The `detect` output above came from a file I did not commit; the `demo`
+  outputs are reproducible from the seed.
+- Not implemented: multiplicative decomposition, STL, multivariate series,
+  and change-point or level-shift detection. Only point anomalies.
 
-## Running the tests
+## Tests
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
+39 tests: the moving-average math (including a hand-verified even-window
+centering case), decomposition on a noise-free synthetic signal, every
+detector's edge cases (`None` skipping, zero-variance and zero-MAD series,
+hand-computed IQR fences), the synthetic generator's determinism, and CLI
+end-to-end runs including a subprocess-level `python -m tsanomaly.cli` check.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
